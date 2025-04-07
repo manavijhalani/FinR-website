@@ -4,7 +4,7 @@ import requests
 from pinecone import Pinecone
 from pinecone_plugins.assistant.models.chat import Message
 import re
-from recommendation import get_recommendation
+from final.backend.recommendation import get_recommendation
 import google.generativeai as genai
 import os
 
