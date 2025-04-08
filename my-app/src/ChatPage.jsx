@@ -31,6 +31,8 @@ import SmartToyIcon from '@mui/icons-material/SmartToy';
 import PersonIcon from '@mui/icons-material/Person';
 import CloseIcon from '@mui/icons-material/Close';
 import TranslateIcon from '@mui/icons-material/Translate';
+import AnimatedSidebar from './AnimatedSidebar';
+import { useNavigate } from 'react-router-dom';
 
 // Define the theme
 const chatbotTheme = createTheme({
@@ -193,6 +195,14 @@ const Chatbot = () => {
   const [language, setLanguage] = useState('en'); // Default language is English
   const messagesEndRef = useRef(null);
   const isMobile = useMediaQuery(chatbotTheme.breakpoints.down('md'));
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  
+  // Example calculations that will be typed out one by one
+  const calculations = [
+    "// Calculating factorial of 5\nlet result = 1;\nfor (let i = 1; i <= 5; i++) {\n  result *= i;\n}\n// 5! = 120",
+    "// Computing Fibonacci sequence\nlet a = 0, b = 1;\nfor (let i = 0; i < 10; i++) {\n  let temp = a + b;\n  a = b;\n  b = temp;\n  console.log(b);\n}",
+    "// Solving quadratic equation\nconst a = 1, b = -3, c = 2;\nconst discriminant = b*b - 4*a*c;\nconst x1 = (-b + Math.sqrt(discriminant)) / (2*a);\nconst x2 = (-b - Math.sqrt(discriminant)) / (2*a);\n// x1 = 2, x2 = 1"
+  ];
 
   // Scroll to bottom whenever chat history changes
   useEffect(() => {
@@ -214,66 +224,178 @@ const Chatbot = () => {
 
   const fetchFunds = async () => {
     try {
-      const res = await axios.get('http://127.0.0.1:5000/schemes');
+      const res = await axios.get('http://127.0.0.1:5001/schemes');
       setFunds(res.data);
       setShowSuggestions(true);
     } catch (error) {
       console.error('Error fetching funds:', error);
     }
   };
+  const navigate=useNavigate();
 
+  const handledash=()=>{
+    navigate('/dash')
+  }
+  
   const selectFund = async (fund) => {
     setShowSuggestions(false);
     setLoading(true);
+    
     try {
-      const res = await axios.get(`http://127.0.0.1:5000/${fund}`);
-      const navData = res.data.data;
-
-      if (navData && navData.length > 0) {
-        // Format NAV data for display
-        const formattedNAV = navData.map((item) => `${item.date}: NAV ${item.nav}`).join('\n');
-
+      // Extract any question from the message about the fund
+      const fundQuestion = message.includes('@') 
+        ? message.replace(`@${fund}`, '').trim() 
+        : "Give me an overview of the fund's performance";
+      
+      // Add user message to chat history
+      setChatHistory((prev) => [
+        ...prev,
+        { message: message || `@${fund}`, isUser: true }
+      ]);
+      
+      // Fetch the fund data
+      const res = await axios.get(`http://127.0.0.1:5001/${fund}`);
+      
+      if (res.data && res.data.data && res.data.data.length > 0) {
+        // Send the fund data and question to the backend for analysis
+        const analysisRes = await axios.post('http://127.0.0.1:5001/analyze-fund', {
+          fundData: {
+            fundName: fund,
+            navData: res.data.data
+          },
+          question: fundQuestion,
+          language: language
+        });
+        
+        // Add the analysis response to chat history
         setChatHistory((prev) => [
           ...prev,
-          { message: `@${fund}`, isUser: true },
-          { message: formattedNAV, isUser: false }
+          { message: analysisRes.data.response, isUser: false }
         ]);
       } else {
         setChatHistory((prev) => [
           ...prev,
-          { message: `@${fund}`, isUser: true },
-          { message: 'No NAV data available.', isUser: false }
+          { message: 'No data available for this fund.', isUser: false }
         ]);
       }
     } catch (error) {
-      console.error('Error fetching fund details:', error);
+      console.error('Error analyzing fund:', error);
       setChatHistory((prev) => [
         ...prev,
-        { message: `@${fund}`, isUser: true },
-        { message: 'Error fetching fund details.', isUser: false }
+        { message: 'Error analyzing fund details. Please try again later.', isUser: false }
       ]);
     }
+    
     setMessage('');
     setLoading(false);
   };
-
+  
+  // Enhanced sendMessage function to handle fund-related queries
   const sendMessage = async () => {
     if (!message.trim()) return;
     setLoading(true);
+    
+    // Add user message to chat history
     setChatHistory((prev) => [...prev, { message, isUser: true }]);
-    try {
-      const res = await axios.post('http://127.0.0.1:5000/chat', { 
-        query: message, 
-        language: language // Send the selected language to the backend
-      });
-      setChatHistory((prev) => [...prev, { message: res.data.response, isUser: false }]);
-    } catch (error) {
-      console.error('Error:', error);
-      setChatHistory((prev) => [...prev, { message: 'Error getting response', isUser: false }]);
+    
+    // Check if message contains a fund reference with @ symbol
+    const fundPattern = /@([a-zA-Z0-9\s]+)/;
+    const fundMatch = message.match(fundPattern);
+    
+    if (fundMatch) {
+      // If a fund is mentioned, process it with selectFund
+      const fundName = fundMatch[1].trim();
+      
+      // Check if the fund exists in our list of funds
+      if (funds.includes(fundName)) {
+        await selectFund(fundName);
+      } else {
+        // If we need to fetch funds first
+        try {
+          const res = await axios.get('http://127.0.0.1:5001/schemes');
+          setFunds(res.data);
+          
+          if (res.data.includes(fundName)) {
+            await selectFund(fundName);
+          } else {
+            setChatHistory((prev) => [
+              ...prev,
+              { message: `Could not find a fund named "${fundName}". Please check the fund name.`, isUser: false }
+            ]);
+            setLoading(false);
+          }
+        } catch (error) {
+          console.error('Error fetching funds:', error);
+          setChatHistory((prev) => [
+            ...prev,
+            { message: 'Error fetching fund information. Please try again later.', isUser: false }
+          ]);
+          setLoading(false);
+        }
+      }
+    } else {
+      // Regular message processing (non-fund related)
+      try {
+        const res = await axios.post('http://127.0.0.1:5001/chat', { 
+          query: message, 
+          language: language // Send the selected language to the backend
+        });
+        
+        // Add response to chat history
+        setChatHistory((prev) => [...prev, { message: res.data.response, isUser: false }]);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error:', error);
+        setChatHistory((prev) => [...prev, { message: 'Error getting response', isUser: false }]);
+        setLoading(false);
+      }
     }
+    
     setMessage('');
-    setLoading(false);
   };
+  
+  // Handle fund suggestion click
+  const handleFundSelection = (fund) => {
+    // If the user has typed a question about a fund
+    if (message.includes('@')) {
+      // Replace the partial fund name with the complete one
+      const updatedMessage = message.replace(/@[a-zA-Z0-9\s]*$/, `@${fund}`);
+      setMessage(updatedMessage);
+    } else {
+      // Just set the fund name as the message
+      setMessage(`@${fund}`);
+    }
+    
+    setShowSuggestions(false);
+  };
+  
+  // Enhanced message input handling for fund suggestions
+  const handleMessageChange = (e) => {
+    setMessage(e.target.value);
+    
+    // Check if the last word starts with @ to show fund suggestions
+    const lastWord = e.target.value.split(' ').pop();
+    if (lastWord.startsWith('@')) {
+      if (funds.length === 0) {
+        fetchFunds(); // Fetch funds if we haven't already
+      } else {
+        setShowSuggestions(true);
+      }
+    } else {
+      setShowSuggestions(false);
+    }
+  };
+  
+  // Filter fund suggestions based on what the user has typed after @
+  const filteredFunds = () => {
+    if (!message.includes('@')) return funds;
+    
+    const searchTerm = message.split('@').pop().toLowerCase();
+    return funds.filter(fund => 
+      fund.toLowerCase().includes(searchTerm)
+    ).slice(0, 10); // Limit to 10 suggestions for better performance
+  };
+  
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -341,7 +463,10 @@ const Chatbot = () => {
                 </Select>
               </FormControl>
             </Box>
-            <Button>Dashboard</Button>
+            <Button onClick={handledash}>Dashboard</Button>
+            <Button onClick={() => setSidebarOpen(true)}>
+        Show Calculations
+      </Button>
           </Toolbar>
         </AppBar>
 
@@ -474,21 +599,47 @@ const Chatbot = () => {
 
           {/* Input Area */}
           <InputContainer>
-            <TextField
-              fullWidth
-              variant="outlined"
-              placeholder={placeholderText[language] || placeholderText['en']}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyPress={handleKeyPress}
-              sx={{
-                mr: 1,
-                '& .MuiOutlinedInput-root': {
-                  borderRadius: '24px',
-                  backgroundColor: chatbotTheme.palette.background.default,
-                }
-              }}
-            />
+          <TextField
+  fullWidth
+  variant="outlined"
+  placeholder={placeholderText[language] || placeholderText['en']}
+  value={message}
+  onChange={handleMessageChange} // Changed to the new handler
+  onKeyPress={handleKeyPress}
+  sx={{
+    mr: 1,
+    '& .MuiOutlinedInput-root': {
+      borderRadius: '24px',
+      backgroundColor: chatbotTheme.palette.background.default,
+    }
+  }}
+/>
+
+// 2. Update the suggestions list:
+{showSuggestions && (
+  <Paper 
+    elevation={3}
+    sx={{ 
+      maxHeight: '200px', 
+      overflow: 'auto',
+      mb: 2,
+      mx: 2,
+      borderRadius: 2
+    }}
+  >
+    <List dense>
+      {filteredFunds().map((fund) => (
+        <SuggestionItem 
+          key={fund} 
+          onClick={() => handleFundSelection(fund)} // Changed to the new handler
+          button
+        >
+          <ListItemText primary={fund} />
+        </SuggestionItem>
+      ))}
+    </List>
+  </Paper>
+)}
             <Button 
               variant="contained" 
               color="primary" 
@@ -506,6 +657,17 @@ const Chatbot = () => {
           </InputContainer>
         </ChatContainer>
       </Box>
+      <div>
+      
+      
+      <AnimatedSidebar 
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        calculations={calculations}
+      />
+      
+      {/* Rest of your chat page content */}
+    </div>
     </ThemeProvider>
   );
 };

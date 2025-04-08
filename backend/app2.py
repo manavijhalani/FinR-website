@@ -7,17 +7,19 @@ import re
 from recommendation import get_recommendation
 import google.generativeai as genai
 import os
+import json
+from calculations import is_calculation_query, handle_calculation_query, update_sip_parameters, setup_gemini, analyze_fund_data
 
 # Initialize Pinecone and Assistant
 pc = Pinecone(api_key='pcsk_TLdAu_Jb44Zfto7BAaaVJJWY38z7sSoK9WhJ6oqUv6RaYAqbzBkCwkiEjRz9M2ELTJk8v')
 assistant = pc.assistant.Assistant(assistant_name="rag1")
 
-# Initialize Gemini AI for translation
-# Replace 'YOUR_GEMINI_API_KEY' with your actual Gemini API key
-genai.configure(api_key='AIzaSyCQfZuXP94fF4qEOOOrfFK25m2SrdYYhqs')
+# Initialize Gemini AI for translation and calculations
+GEMINI_API_KEY = 'AIzaSyCQfZuXP94fF4qEOOOrfFK25m2SrdYYhqs'
+genai.configure(api_key=GEMINI_API_KEY)
 
-# Get Gemini model for translation
-model = genai.GenerativeModel('Gemini 2.0 Flash Thinking Experimental 01-21')
+# Get Gemini model for translation and calculations
+model = genai.GenerativeModel('gemini-2.0-flash')
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -30,6 +32,10 @@ user_sessions = {}
 # Global flag to track if recommendation flow is in progress
 in_recommendation_mode = False
 recommendation_state = {}
+
+# Global flag to track if calculation flow is in progress
+in_calculation_mode = False
+calculation_state = {}
 
 # Dictionary for mapping language codes to their names
 language_names = {
@@ -69,7 +75,7 @@ def is_recommendation_request(query: str) -> bool:
 
 def handle_recommendation_logic(query: str, lang: str) -> str:
     """Handle the recommendation dialogue flow with translation support."""
-    global recommendation_state
+    global recommendation_state, in_recommendation_mode
 
     # First translate the query to English for processing
     if lang != 'en':
@@ -114,6 +120,7 @@ def handle_recommendation_logic(query: str, lang: str) -> str:
             )
             # Clear the state and recommendation mode after giving the recommendation
             recommendation_state = {}
+            in_recommendation_mode = False
         else:
             response_in_english = "Please specify your risk tolerance (1-5):"
     
@@ -125,6 +132,13 @@ def handle_recommendation_logic(query: str, lang: str) -> str:
         return translate_text(response_in_english, 'en', lang)
     else:
         return response_in_english
+
+def extract_fund_name(query):
+    """Extract fund name from a query containing @."""
+    match = re.search(r'@([a-zA-Z0-9\s]+)', query)
+    if match:
+        return match.group(1).strip()
+    return None
 
 def chunk_response(text, chunk_size=300):
     """Split a long response into chunks of max `chunk_size` characters."""
@@ -145,7 +159,7 @@ def chunk_response(text, chunk_size=300):
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    global user_sessions, in_recommendation_mode
+    global user_sessions, in_recommendation_mode, in_calculation_mode, calculation_state
 
     try:
         data = request.get_json()
@@ -160,15 +174,6 @@ def chat():
         if not user_message:
             return jsonify({"error": "'query' field is missing"}), 400
 
-        # Handle investment recommendation flow
-        if is_recommendation_request(user_message) or in_recommendation_mode:
-            in_recommendation_mode = True
-            response = handle_recommendation_logic(user_message, language)
-            if not in_recommendation_mode:
-                # If recommendation flow is completed, reset the flag
-                in_recommendation_mode = False
-            return jsonify({"response": response})
-
         # Check if user has pending message chunks
         if user_id in user_sessions and user_sessions[user_id]:
             remaining_chunks = user_sessions[user_id].pop(0)  # Get next chunk
@@ -179,6 +184,115 @@ def chat():
                 
             return jsonify({"response": remaining_chunks})
 
+        # Check if it's a fund query containing @
+        fund_name = extract_fund_name(user_message)
+        if fund_name:
+            # Translate user message to English if needed
+            if language != 'en':
+                query_for_processing = translate_text(user_message, language, 'en')
+            else:
+                query_for_processing = user_message
+                
+            # Get fund data
+            try:
+                fund_response = requests.get(f"https://api.mfapi.in/mf")
+                fund_response.raise_for_status()
+                funds_data = fund_response.json()
+                
+                # Find the code for the given fund name
+                fund_code = None
+                for fund in funds_data:
+                    if fund.get("schemeName") and fund_name.lower() in fund.get("schemeName").lower():
+                        fund_code = fund.get("schemeCode")
+                        break
+                
+                if not fund_code:
+                    return jsonify({"response": f"Could not find fund matching '{fund_name}'. Please check the fund name."})
+                
+                # Fetch fund historical data
+                fund_details = requests.get(f"https://api.mfapi.in/mf/{fund_code}")
+                fund_details.raise_for_status()
+                nav_data = fund_details.json().get("data", [])
+                
+                if not nav_data:
+                    return jsonify({"response": f"No historical data found for '{fund_name}'."})
+                
+                # Analyze fund data with user's question
+                analysis = analyze_fund_data(nav_data, query_for_processing, fund_name, model)
+                
+                # Translate analysis back to user's language if needed
+                if language != 'en':
+                    analysis = translate_text(analysis, 'en', language)
+                
+                return jsonify({"response": analysis})
+                
+            except Exception as e:
+                print(f"Error processing fund query: {e}")
+                error_msg = f"Error processing fund data for '{fund_name}': {str(e)}"
+                if language != 'en':
+                    error_msg = translate_text(error_msg, 'en', language)
+                return jsonify({"response": error_msg})
+
+        # Check if we're in calculation mode
+        if in_calculation_mode:
+            if calculation_state.get("complete", True):
+                # Start a new calculation
+                calculation_result = handle_calculation_query(user_message, model, translate_text, language, language)
+                calculation_state = calculation_result
+                in_calculation_mode = not calculation_result.get("complete", True)
+                return jsonify({"response": calculation_result["response"]})
+            else:
+                # Continue with the current calculation
+                updated_state = update_sip_parameters(calculation_state, user_message, model)
+                calculation_state = updated_state
+                
+                if not updated_state.get("missing"):
+                    # All parameters are collected, perform the calculation
+                    calculation_result = handle_calculation_query("", model, translate_text, language, language)
+                    calculation_state = calculation_result
+                    in_calculation_mode = False
+                    return jsonify({"response": calculation_result["response"]})
+                else:
+                    # Still missing parameters
+                    missing_param_names = {
+                        "monthly_investment": "monthly investment amount",
+                        "interest_rate": "annual interest rate (as a percentage)",
+                        "time_period": "investment duration in years"
+                    }
+                    
+                    next_param = updated_state["missing"][0]
+                    response = f"Please provide the {missing_param_names[next_param]}:"
+                    
+                    # Translate the response
+                    if language != 'en':
+                        response = translate_text(response, 'en', language)
+                    
+                    return jsonify({"response": response})
+
+        # Check if we're in recommendation mode
+        if is_recommendation_request(user_message) or in_recommendation_mode:
+            in_recommendation_mode = True
+            response = handle_recommendation_logic(user_message, language)
+            return jsonify({"response": response})
+        
+        # Check if it's a calculation query
+        if not in_calculation_mode:
+            # Translate user message to English if needed
+            if language != 'en':
+                query_for_processing = translate_text(user_message, language, 'en')
+            else:
+                query_for_processing = user_message
+            
+            calc_type = is_calculation_query(query_for_processing)
+            if calc_type:
+                in_calculation_mode = True
+                calculation_result = handle_calculation_query(user_message, model, translate_text, language, language)
+                calculation_state = calculation_result
+                in_calculation_mode = not calculation_result.get("complete", True)
+                return jsonify({"response": calculation_result["response"]})
+
+        # If not in any special mode, process with the assistant
+        
         # Translate user message to English if not in English
         if language != 'en':
             query_for_processing = translate_text(user_message, language, 'en')
@@ -214,6 +328,34 @@ def chat():
         print(f"Error: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
+@app.route('/analyze-fund', methods=['POST'])
+def analyze_fund_endpoint():
+    """Analyze fund data and respond to specific questions using Gemini."""
+    try:
+        data = request.get_json()
+        fund_data = data.get("fundData")
+        question = data.get("question", "")
+        language = data.get("language", "en")
+        
+        # Translate question to English if needed
+        if language != 'en':
+            question_for_processing = translate_text(question, language, 'en')
+        else:
+            question_for_processing = question
+            
+        # Analyze fund data
+        analysis = analyze_fund_data(fund_data['navData'], question_for_processing, fund_data['fundName'], model)
+            
+        # Translate back to user's language if needed
+        if language != 'en':
+            analysis = translate_text(analysis, 'en', language)
+            
+        return jsonify({"response": analysis})
+        
+    except Exception as e:
+        print(f"Error in fund analysis: {e}")
+        return jsonify({"error": f"Failed to analyze fund data: {str(e)}"}), 500
+
 @app.route('/<fundname>', methods=['GET'])
 def get_details(fundname):
     """Fetch past and present details for a specific mutual fund."""
@@ -235,13 +377,6 @@ def get_details(fundname):
         past_response = requests.get(past_url)
         past_response.raise_for_status()
         past_data = past_response.json()
-        #fund_house=past_data['fund_house']
-        #scheme_type=past_data['scheme_type']
-        #scheme_category=past_data['scheme_category']
-        #scheme_code=past_data['scheme_code']
-        #scheme_name=past_data['scheme_name']
-        #isin_growth=past_data['isin_growth']
-        #isin_div_reinvestment=past_data['isin_reinvestment']
 
 
         if "data" not in past_data:
@@ -263,7 +398,6 @@ def get_names():
 
         # Build a list of scheme names
         scheme_names = [scheme.get("schemeName") for scheme in data if scheme.get("schemeName")]
-
         
         return jsonify(scheme_names)  
     except requests.exceptions.RequestException as e:
@@ -271,4 +405,4 @@ def get_names():
     
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
