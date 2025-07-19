@@ -9,12 +9,12 @@ import google.generativeai as genai
 import os
 
 # Initialize Pinecone and Assistant
-pc = Pinecone(api_key='pcsk_TLdAu_Jb44Zfto7BAaaVJJWY38z7sSoK9WhJ6oqUv6RaYAqbzBkCwkiEjRz9M2ELTJk8v')
+pc = Pinecone(api_key='')
 assistant = pc.assistant.Assistant(assistant_name="rag1")
 
 # Initialize Gemini AI for translation
 # Replace 'YOUR_GEMINI_API_KEY' with your actual Gemini API key
-genai.configure(api_key='AIzaSyCQfZuXP94fF4qEOOOrfFK25m2SrdYYhqs')
+genai.configure(api_key='')
 
 # Get Gemini model for translation
 model = genai.GenerativeModel('Gemini 2.0 Flash Thinking Experimental 01-21')
