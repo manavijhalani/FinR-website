@@ -11,11 +11,11 @@ import json
 from calculations import is_calculation_query, handle_calculation_query, update_sip_parameters, setup_gemini, analyze_fund_data
 
 # Initialize Pinecone and Assistant
-pc = Pinecone(api_key='pcsk_TLdAu_Jb44Zfto7BAaaVJJWY38z7sSoK9WhJ6oqUv6RaYAqbzBkCwkiEjRz9M2ELTJk8v')
+pc = Pinecone(api_key='')
 assistant = pc.assistant.Assistant(assistant_name="rag1")
 
 # Initialize Gemini AI for translation and calculations
-GEMINI_API_KEY = 'AIzaSyCQfZuXP94fF4qEOOOrfFK25m2SrdYYhqs'
+GEMINI_API_KEY = ''
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Get Gemini model for translation and calculations
